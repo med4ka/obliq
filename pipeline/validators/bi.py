@@ -1,0 +1,182 @@
+"""Pydantic validation of BI XLSX exports (BI7DRR + JISDOR).
+
+WHAT is validated: the raw .xlsx bytes returned by the "Unduh" (Export) button
+on the two BI pages. The XLSX is a zip of XML parts (no openpyxl dependency --
+stdlib zipfile + ElementTree only, per Sesi 15). We parse the shared-strings
+table + worksheet, verify the header row matches the EXPECTED column layout,
+and only then map rows into a Pydantic schema.
+
+Expected layouts (verified on real exports in Sesi 15):
+  - BI7DRR:  title row | [NO, Tanggal, BI-7Day-RR] | data rows (one RDG date
+             per policy decision, "15 Desember 2016", value "4.75 %")
+  - JISDOR:  title row | [NO, Tanggal, Kurs] | data rows (one business day per
+             row, date "8/7/2026 12:00:00 AM", Kurs integer Rupiah "17913")
+
+WHY fail loudly: BI has changed page layouts without notice before (RULES.md 1).
+If the header drifts (column missing/renamed), we RAISE BiStructureError instead
+of reading the wrong cells and emitting garbage numbers into macro_indicators.
+Structure drift is a real change to inspect manually -- never an excuse to guess.
+"""
+from __future__ import annotations
+
+import io
+import re
+import zipfile
+import xml.etree.ElementTree as ET
+from typing import Any
+
+from pydantic import BaseModel
+
+# Excel 2007+ spreadsheet namespace used by every part.
+_XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+class BiStructureError(ValueError):
+    """The XLSX layout does not match the BI layout verified in Sesi 15.
+
+    Raised instead of reading wrong cells silently (SYSTEM.md 3). Callers must
+    stop and inspect manually -- do NOT patch around it without approval.
+    """
+
+
+class BiRow(BaseModel):
+    """One raw data row parsed from the XLSX (still unnormalized strings)."""
+
+    no: str  # "NO"? no -- data rows only; ordinal like "1"
+    date_raw: str  # "15 Desember 2016" (BI7DRR) or "8/7/2026 12:00:00 AM" (JISDOR)
+    value_raw: str  # "4.75 %" (BI7DRR) or "17913" (JISDOR)
+
+
+class BiSpreadsheet(BaseModel):
+    """A validated BI export: raw rows with a verified header layout."""
+
+    indicator_type: str  # "bi_7drr" | "usd_idr"
+    header: list[str]
+    rows: list[BiRow]
+
+
+# Header layouts verified in Sesi 15. JISDOR is fetched per year so its export
+# keeps this exact header on every year.
+_EXPECTED_HEADERS: dict[str, list[str]] = {
+    "bi_7drr": ["NO", "Tanggal", "BI-7Day-RR"],
+    "usd_idr": ["NO", "Tanggal", "Kurs"],
+}
+
+
+def _read_shared_strings(xlsx: zipfile.ZipFile) -> list[str]:
+    """Decode the sharedStrings table: [{...t text...}] vs inline <t> runs."""
+    if "xl/sharedStrings.xml" not in xlsx.namelist():
+        return []
+    root = ET.fromstring(xlsx.read("xl/sharedStrings.xml"))
+    strings: list[str] = []
+    for si in root.iter(_XLSX_NS + "si"):
+        strings.append("".join(t.text or "" for t in si.iter(_XLSX_NS + "t")))
+    return strings
+
+
+def _cell_text(cell: ET.Element, shared: list[str]) -> str:
+    """Return a cell's resolved text; shared-string index if t='s', else value.
+
+    Cells may also hold inline styles; only <t> (shared) and <v> (inline value)
+    are needed here.
+    """
+    cell_type = cell.get("t")
+    if cell_type == "s":  # shared string: <v> is an index into sharedStrings
+        v = cell.find(_XLSX_NS + "v")
+        if v is None or v.text is None:
+            return ""
+        idx = int(v.text)
+        return shared[idx] if 0 <= idx < len(shared) else ""
+    v = cell.find(_XLSX_NS + "v")
+    return v.text if v is not None and v.text is not None else ""
+
+
+def _sheet_rows(xlsx: zipfile.ZipFile, shared: list[str]) -> list[list[str]]:
+    """Read xl/worksheets/sheet1.xml into rows of cell texts (skipping blanks)."""
+    if "xl/worksheets/sheet1.xml" not in xlsx.namelist():
+        raise BiStructureError("XLSX tidak punya xl/worksheets/sheet1.xml")
+    root = ET.fromstring(xlsx.read("xl/worksheets/sheet1.xml"))
+    rows: list[list[str]] = []
+    for row in root.iter(_XLSX_NS + "row"):
+        cells = [_cell_text(c, shared) for c in row]
+        if any(t for t in cells):
+            rows.append(cells)
+    return rows
+
+
+def _is_header_row(cells: list[str]) -> bool:
+    """A header row has the exact expected labels in its first 3 cells."""
+    return cells and any("NO" in c for c in cells) and any("Tanggal" in c for c in cells)
+
+
+def validate_xlsx(xlsx_bytes: bytes, indicator_type: str) -> BiSpreadsheet:
+    """Validate raw XLSX bytes against the expected per-indicator layout.
+
+    Raises BiStructureError on any layout drift or malformed zip so the caller
+    never proceeds to transform with garbage columns (SYSTEM.md 3).
+    """
+    expected = _EXPECTED_HEADERS.get(indicator_type)
+    if expected is None:
+        raise ValueError(f"indicator_type tidak dikenal: {indicator_type!r}")
+
+    try:
+        xlsx = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    except zipfile.BadZipFile as exc:
+        raise BiStructureError(
+            f"Export BI bukan file XLSX yang valid (BadZipFile): {exc}"
+        ) from exc
+
+    shared = _read_shared_strings(xlsx)
+    rows = _sheet_rows(xlsx, shared)
+
+    # Locate the header row (may be prefixed by a title row like
+    # "Informasi Kurs Jisdor" merged across columns, Sesi 15).
+    header_idx: int | None = None
+    for idx, cells in enumerate(rows):
+        if _is_header_row(cells):
+            header_idx = idx
+            break
+    if header_idx is None:
+        raise BiStructureError(
+            f"Struktur XLSX BERUBAH ({indicator_type}): header "
+            f"'NO | Tanggal | ...' tidak ditemukan. Reviu manual."
+        )
+
+    header = [t.strip() for t in rows[header_idx][:3]]
+    if header != expected:
+        raise BiStructureError(
+            f"Struktur XLSX BERUBAH ({indicator_type}): header={header!r}, "
+            f"diharapkan {expected!r}. Stop dan reviu manual."
+        )
+
+    # Data rows follow the header: at least 3 cells [NO, Tanggal, value].
+    parsed: list[BiRow] = []
+    for cells in rows[header_idx + 1:]:
+        if len(cells) < 3 or not cells[0].strip():
+            continue  # trailing empty row / merged artifact
+        if not re.match(r"^\d+$", cells[0].strip()):
+            continue  # not an ordinal data row (e.g. trailing notes)
+        parsed.append(
+            BiRow(no=cells[0].strip(), date_raw=cells[1].strip(), value_raw=cells[2].strip())
+        )
+
+    return BiSpreadsheet(
+        indicator_type=indicator_type,
+        header=header,
+        rows=parsed,
+    )
+
+
+def validate_exports(exports: list[object]) -> list[BiSpreadsheet]:
+    """Validate a list of fetched BiExport objects; re-raise first error.
+
+    ARCHITECTURE.md 4: failed validation must not reach transform.
+    """
+    result: list[BiSpreadsheet] = []
+    for export in exports:
+        indicator = getattr(export, "indicator_type", None)
+        body = getattr(export, "xlsx_bytes", None)
+        if not isinstance(body, bytes):
+            raise TypeError(f"BiExport tanpa xlsx_bytes: {type(export).__name__}")
+        result.append(validate_xlsx(body, indicator))
+    return result

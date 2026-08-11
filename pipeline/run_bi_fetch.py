@@ -1,0 +1,130 @@
+"""Manual end-to-end BI fetch: fetch -> validate -> transform -> store.
+
+Fase 1 runs fetchers manually (no APScheduler yet, per PROGRESS.md).
+
+Follows the approved Sesi 15 scope:
+  - BI7DRR: ONE full export (2016-04-21 -> today, ~126 rows).
+  - JISDOR: per-year exports (the XLSX export is capped ~3200 rows, Sesi 15).
+    Pass explicit years so we can checkpoint (a validation set first), then
+    walk 2013..2026 one year at a time when approved.
+
+Run from repo root:
+    python -m pipeline.run_bi_fetch --bi7drr --jisdor-years 2016,2020,2026
+    python -m pipeline.run_bi_fetch --bi7drr                    # BI7DRR only
+    python -m pipeline.run_bi_fetch --jisdor-years 2013,2026    # JISDOR years
+
+Any export that fails fetch (network/BI reject) or validate (layout drift) is
+logged as an explicit gap, counted in the report, and does NOT abort the rest
+of the run (SYSTEM.md 3 / ARCHITECTURE.md 4).
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+from datetime import date, datetime
+
+from db.connection import get_engine
+from pipeline.fetchers.bi import (
+    BI7DRR_EARLIEST_DATE,
+    BiExport,
+    BiFetchError,
+    fetch_bi7drr,
+    fetch_jisdor_years,
+)
+from pipeline.storage.bi import store
+from pipeline.transformers.bi import transform
+from pipeline.validators.bi import BiStructureError, validate_xlsx
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_years(value: str) -> list[int]:
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    try:
+        return [int(p) for p in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "tahun harus integer dipisah koma (mis. 2016,2020,2026)"
+        ) from exc
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="BI macro indicator fetch (BI7DRR + JISDOR)")
+    parser.add_argument("--bi7drr", action="store_true", help="fetch BI7DRR (1 full export)")
+    parser.add_argument(
+        "--jisdor-years",
+        type=_parse_years,
+        default=None,
+        help="JISDOR per-tahun, koma-dipisah, mis. 2016,2020,2026",
+    )
+    args = parser.parse_args()
+
+    if not args.bi7drr and not args.jisdor_years:
+        parser.error("pilih minimal satu: --bi7drr atau --jisdor-years (lihat --help)")
+
+    engine = get_engine()
+
+    exports: list[BiExport] = []
+    if args.bi7drr:
+        logger.info("Mengambil BI7DRR: full %s s/d %s", BI7DRR_EARLIEST_DATE, date.today())
+        exports.append(fetch_bi7drr(BI7DRR_EARLIEST_DATE, date.today()))
+
+    if args.jisdor_years:
+        years = sorted(set(args.jisdor_years))
+        logger.info("Mengambil JISDOR per tahun: %s", years)
+        exports.extend(fetch_jisdor_years(years))
+
+    logger.info("Validasi %d export XLSX...", len(exports))
+    validated = []
+    failed_gaps: list[str] = []
+    for export in exports:
+        try:
+            validated.append(validate_xlsx(export.xlsx_bytes, export.indicator_type))
+        except BiStructureError as exc:
+            failed_gaps.append(
+                f"structure: {export.indicator_type} {export.date_from}..{export.date_to} -> {exc}"
+            )
+            logger.error("GAP struktur %s", exc)
+        except BiFetchError as exc:
+            failed_gaps.append(
+                f"fetch: {export.indicator_type} {export.date_from}..{export.date_to} -> {exc}"
+            )
+            logger.error("GAP fetch %s", exc)
+        except Exception as exc:  # noqa: BLE001 -- surface anything unexpected as a gap
+            failed_gaps.append(
+                f"unexpected: {export.indicator_type} {export.date_from}..{export.date_to} "
+                f"-> {type(exc).__name__}: {exc}"
+            )
+            logger.exception("GAP tak terduga pada %s", export.indicator_type)
+
+    transformed = transform(validated)
+    counts = store(engine, transformed, fetched_at=datetime.now())
+
+    print("\n" + "=" * 72)
+    print("LAPORAN RUN BI")
+    print("=" * 72)
+    print(f"Export di-fetch     : {len(exports)}")
+    print(f"Export valid        : {len(validated)}")
+    print(f"GAP (gagal/parsing) : {len(failed_gaps)}")
+    for gap in failed_gaps:
+        print(f"    - {gap}")
+    print(f"Records di-upsert    : {sum(counts.values())} ({counts})")
+    print("-" * 72)
+    for rec in transformed[:12]:
+        print(f"  {rec.observation_date}  {rec.indicator_type:<10} value={rec.value}")
+    if len(transformed) > 12:
+        print(f"  ... dan {len(transformed) - 12} observasi lainnya")
+    print("=" * 72)
+    print(
+        "Verifikasi manual di DB: SELECT indicator_type, observation_date, value, source "
+        "FROM macro_indicators WHERE source='BI' ORDER BY observation_date DESC LIMIT 20;"
+    )
+
+
+if __name__ == "__main__":
+    main()

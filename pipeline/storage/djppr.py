@@ -1,0 +1,123 @@
+"""Storage of DJPPR auction results into PostgreSQL.
+
+Upsert contract (ARCHITECTURE.md 4): re-running fetch for the same auction must
+update existing rows, never duplicate. Two idempotency keys are involved:
+
+  - `bonds` is keyed by the UNIQUE `code` (a series like FR0108 is auctioned
+    repeatedly -> must map to ONE row);
+  - `yield_observations` is keyed by UNIQUE (bond_id, observation_date), so a
+    re-fetch of the same auction/date updates the yield in place.
+
+`source='DJPPR'` and `fetched_at` are audit fields (SCHEMA.md): every number in
+the dashboard must be traceable to where it came from and when.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+
+from pipeline.transformers.djppr import BondRecord, YieldObservationRecord
+
+logger = logging.getLogger(__name__)
+
+SOURCE_DJPPR = "DJPPR"
+
+UPSERT_BOND_SQL = text(
+    """
+    INSERT INTO bonds (code, name, type, coupon_rate, maturity_date, tenor_years, is_active)
+    VALUES (:code, :name, :type, :coupon_rate, :maturity_date, :tenor_years, true)
+    ON CONFLICT (code) DO UPDATE
+        SET name = EXCLUDED.name,
+            type = EXCLUDED.type,
+            coupon_rate = EXCLUDED.coupon_rate,
+            maturity_date = EXCLUDED.maturity_date,
+            tenor_years = EXCLUDED.tenor_years
+    RETURNING id
+    """
+)
+
+UPSERT_YIELD_SQL = text(
+    """
+    INSERT INTO yield_observations (bond_id, observation_date, yield_value, source, fetched_at, is_estimated)
+    VALUES (:bond_id, :observation_date, :yield_value, :source, :fetched_at, false)
+    ON CONFLICT (bond_id, observation_date) DO UPDATE
+        SET yield_value = EXCLUDED.yield_value,
+            source = EXCLUDED.source,
+            fetched_at = EXCLUDED.fetched_at
+    """
+)
+
+
+class DjpprStoreResult:
+    """What a store() run wrote (for the run script's report)."""
+
+    def __init__(self, bonds_written: int, observations_written: int, bond_ids: dict[str, int]) -> None:
+        self.bonds_written = bonds_written
+        self.observations_written = observations_written
+        self.bond_ids = bond_ids  # code -> bonds.id (for FK resolution)
+
+    def __repr__(self) -> str:
+        return (
+            f"DjpprStoreResult(bonds={self.bonds_written}, "
+            f"yield_observations={self.observations_written})"
+        )
+
+
+def store(engine: Engine, bonds: list[BondRecord], yield_obs: list[YieldObservationRecord],
+          fetched_at: datetime | None = None) -> DjpprStoreResult:
+    """Upsert normalized DJPPR data. Returns a DjpprStoreResult.
+
+    Bonds are upserted first (idempotent by code) so we can resolve the FK
+    bond_id before inserting yield observations (SCHEMA.md: bonds.code UNIQUE,
+    yield_observations.bond_id -> bonds.id).
+    """
+    fetched_at = fetched_at or datetime.now()
+    bond_ids: dict[str, int] = {}
+
+    with engine.begin() as conn:
+        bonds_written = 0
+        for bond in bonds:
+            row = conn.execute(
+                UPSERT_BOND_SQL,
+                {
+                    "code": bond.code,
+                    "name": bond.name,
+                    "type": bond.type,
+                    "coupon_rate": bond.coupon_rate,
+                    "maturity_date": bond.maturity_date,
+                    "tenor_years": bond.tenor_years,
+                },
+            ).first()
+            if row is None:
+                raise RuntimeError(f"Upsert bonds {bond.code} tidak mengembalikan id")
+            bond_ids[bond.code] = int(row[0])  # RETURNING id -> positional
+            bonds_written += 1
+
+        obs_written = 0
+        for obs in yield_obs:
+            bond_id = bond_ids.get(obs.bond_code)
+            if bond_id is None:
+                raise RuntimeError(
+                    f"yield observation untuk {obs.bond_code} tanpa bond_id "
+                    f"(bond belum ada di batch bonds)"
+                )
+            conn.execute(
+                UPSERT_YIELD_SQL,
+                {
+                    "bond_id": bond_id,
+                    "observation_date": obs.observation_date,
+                    "yield_value": obs.yield_value,  # Decimal stays Decimal via driver
+                    "source": SOURCE_DJPPR,
+                    "fetched_at": fetched_at,
+                },
+            )
+            obs_written += 1
+
+    logger.info(
+        "DJPPR upsert selesai: %d bonds, %d yield_observations (source=%s)",
+        bonds_written, obs_written, SOURCE_DJPPR,
+    )
+    return DjpprStoreResult(bonds_written, obs_written, bond_ids)

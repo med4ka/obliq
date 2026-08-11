@@ -1,0 +1,36 @@
+"""Database engine bootstrap (Fase 0 minimal).
+
+Loads DATABASE_URL from .env (never hardcoded).
+No models yet -- Fase 1 will define SQLAlchemy models + Alembic migrations.
+"""
+from __future__ import annotations
+
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+_engine: Engine | None = None
+
+
+def get_engine() -> Engine:
+    """Return a configured SQLAlchemy engine for the local PostgreSQL database.
+
+    The engine is created once and cached: a FastAPI/Streamlit process lives
+    longer than one script run, and a fresh engine per request would drain the
+    connection pool budget (ARCHITECTURE.md 3).
+    """
+    global _engine
+    if _engine is None:
+        if not DATABASE_URL:
+            raise RuntimeError(
+                "DATABASE_URL kosong. Salin .env.example ke .env dan isi DSN-nya."
+            )
+        # Financial values must never use float (SYSTEM.md 5).
+        _engine = create_engine(DATABASE_URL)
+    return _engine

@@ -1,0 +1,118 @@
+"""FastAPI response schemas (api layer).
+
+Every money/rate number MUST stay precise in the response (SYSTEM.md 1.5):
+Decimal fields are explicitly serialized to strings via field_serializer, so
+JSON output carries exact stored digits (e.g. "17913.0000") and never a float.
+
+Each item carries its own `source` + `fetched_at` (SCHEMA.md: audit trail is
+part of the product) and `observation_date` so freshness is never implicit.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, Field, field_serializer
+
+# Badge text defined in RULES.md 3 -- web/API consumers may render it verbatim
+# so dummy data is never presented as official statistics.
+DUMMY_BADGE = "DATA CONTOH — BELUM DARI SUMBER RESMI"
+
+
+def _ser_decimal(value):
+    """Decimal -> exact string in JSON; None stays None."""
+    return str(value) if value is not None else None
+
+
+class MacroItem(BaseModel):
+    """One macro indicator observation.
+
+    `is_dummy` + `notice` are the API's honesty signal for non-official data
+    (RULES.md 3): a consumer can flag rows whose source starts with "DUMMY"
+    before rendering them as if they were real statistics.
+    """
+
+    indicator_type: str
+    observation_date: date
+    value: Decimal
+    source: str
+    fetched_at: datetime
+    is_dummy: bool
+    notice: str | None = Field(default=None, description="non-null only when data is dummy")
+
+    @field_serializer("value")
+    def _ser_value(self, value, _info):
+        return _ser_decimal(value)
+
+
+class MacroLatestResponse(BaseModel):
+    status: str = "ok"  # "ok" | "empty"
+    message: str | None = None
+    count: int = 0
+    items: list[MacroItem] = []
+
+
+class MacroHistoryResponse(BaseModel):
+    status: str = "ok"  # "ok" | "empty"
+    message: str | None = None
+    indicator_type: str
+    start: date | None = None
+    end: date | None = None
+    count: int = 0
+    items: list[MacroItem] = []
+
+
+class YieldCurvePoint(BaseModel):
+    """One bond's latest yield -- a point on the current yield curve."""
+
+    bond_code: str
+    bond_name: str
+    tenor_years: Decimal | None
+    coupon_rate: Decimal | None
+    maturity_date: date | None
+    observation_date: date
+    yield_value: Decimal
+    price: Decimal | None
+    source: str
+    fetched_at: datetime
+    is_estimated: bool
+
+    @field_serializer("tenor_years", "coupon_rate", "yield_value", "price")
+    def _ser_money(self, value, _info):
+        return _ser_decimal(value)
+
+
+class YieldCurveCurrentResponse(BaseModel):
+    status: str = "ok"  # "ok" | "empty"
+    message: str | None = None
+    as_of: date | None = Field(
+        default=None, description="latest observation_date across the curve"
+    )
+    count: int = 0
+    items: list[YieldCurvePoint] = []
+
+
+class YieldHistoryItem(BaseModel):
+    """One yield observation for one bond over time."""
+
+    observation_date: date
+    yield_value: Decimal
+    price: Decimal | None
+    source: str
+    fetched_at: datetime
+    is_estimated: bool
+
+    @field_serializer("yield_value", "price")
+    def _ser_money(self, value, _info):
+        return _ser_decimal(value)
+
+
+class YieldHistoryResponse(BaseModel):
+    status: str = "ok"  # "ok" | "empty" | "not_found"
+    message: str | None = None
+    bond_code: str
+    bond_name: str | None = None
+    start: date | None = None
+    end: date | None = None
+    count: int = 0
+    items: list[YieldHistoryItem] = []

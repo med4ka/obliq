@@ -1,0 +1,37 @@
+"""Router: /api/yield-curve (read-only yield curve endpoints)."""
+from __future__ import annotations
+
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from api import schemas
+from api.dependencies import get_db
+from api.services import yield_service
+
+router = APIRouter(prefix="/api/yield-curve", tags=["yield-curve"])
+
+
+@router.get("/current", response_model=schemas.YieldCurveCurrentResponse)
+def read_current_curve(
+    db: Session = Depends(get_db),
+) -> schemas.YieldCurveCurrentResponse:
+    """Current government yield curve (latest yield per active bond)."""
+    return yield_service.build_current_curve(db)
+
+
+@router.get("/history", response_model=schemas.YieldHistoryResponse)
+def read_bond_history(
+    bond_code: str = Query(..., description="e.g. FR0100"),
+    start: date | None = Query(default=None, description="inclusive"),
+    end: date | None = Query(default=None, description="inclusive"),
+    db: Session = Depends(get_db),
+) -> schemas.YieldHistoryResponse:
+    """Yield history of one bond, optionally bounded by [start, end]."""
+    if start is not None and end is not None and start > end:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Rentang tidak valid: start ({start}) setelah end ({end}).",
+        )
+    return yield_service.build_bond_history(db, bond_code, start, end)
