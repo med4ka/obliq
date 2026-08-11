@@ -3,8 +3,8 @@
 > File ini WAJIB dibaca AI di awal SETIAP sesi, dan WAJIB di-update di akhir SETIAP sesi. Ini "memori kerja" antar sesi — pola yang sama seperti project-project sebelumnya (Selaras, NusaPath).
 
 ## Status Saat Ini
-**Fase aktif:** Fase 1 — Kurva Yield Pemerintah + Makro. **BACKEND SEDANG BERJALAN & TERAUDIT (Sesi 19):** 3 fetcher (BPS/DJPPR/BI) + API FastAPI read-only + scheduler APScheduler — **84 test hijau, idempotency 3x TERUJI, gap handling TERUJI (sumber mati = gap jelas, bukan fabrikasi), integritas data lintas tabel CLEAN (0 orphan, 0 tanggal aneh, unique constraints reject duplikat), tidak ada secret ter-commit**. **Fase 1 backend: audited & stable.** Sisa untuk Fase 1: dashboard Streamlit (kurva yield + indikator makro) & gap handling di dashboard.
-**Terakhir dikerjakan:** Sesi 19 — auditing & stabilisasi menyeluruh backend (bukan nambah fitur): coverage audit + idempotency 3x + gap handling nyata + integritas data lintas tabel + full test suite + audit secret. Detail laporan di bawah (item "Sesi 19").
+**Fase aktif:** Fase 1 — Kurva Yield Pemerintah + Makro. **BACKEND SEDANG BERJALAN & TERAUDIT (Sesi 19)** — 84 test hijau, idempotency 3x TERUJI, gap handling TERUJI, integritas data clean, tidak ada secret ter-commit. **GIT REPO AKTIF (Sesi 20):** commit pertama `7f2eea8` "Fase 1 backend OBLIQ: pipeline kurva yield & makro (audited & stable)" (69 files, 8k baris); `.env` TERVERIFIKASI tidak ter-track, `git status` bersih; BELUM ada remote (keputusan push terpisah nanti). Selanjutnya utk Fase 1: dashboard Streamlit (kurva yield + indikator makro) & gap handling di dashboard.
+**Terakhir dikerjakan:** Sesi 20 — `git init` root + commit pertama; `.gitignore` diperkuat (`.coverage`, `.coverage.*`); `.env`/`.venv`/`__pycache__` terverifikasi lewat `git ls-files` TIDAK ada di index; fixture HTML/XLSX hasil observasi sumber dibukukan (bukan cache scraping runtime — fetcher parse in-memory). Detail di item "Sesi 20" di bawah.
 **Update terakhir:** 2026-08-11
 
 ---
@@ -183,6 +183,25 @@ Berhasil fetch minimal 1 data point nyata dari BPS, DJPPR, dan BI secara manual 
 
 ## Log Sesi
 > Tambahkan entry baru di sini SETIAP akhir sesi kerja. Format: tanggal — apa yang dikerjakan — apa yang masih pending — apa yang WAJIB direview Ghif duluan — konsep finance baru yang ditemukan (kalau ada).
+
+### 2026-08-11 — Sesi 20 (git init + commit pertama — perlindungan secret aktif)
+- Dikerjakan:
+  1. **`git init`** di root project (sebelumnya folder BUKAN git repo — temuan Sesi 19). Repo sekarang aktif di `master`.
+  2. **`.gitignore` diperiksa & diperkuat** — sudah benar mencakup `.env`, `.venv/`, `__pycache__/`, `*.pyc`, `.pytest_cache/`; **ditambah `.coverage` dan `.coverage.*`** (artefak coverage report di root dari audit Sesi 19). Cek file cache HTML/PDF scraping: **tidak ada** — ketiga fetcher (bps/bi/djppr) parse respons in-memory, tidak menyimpan HTML/PDF ke disk. Satu-satunya HTML disimpan = `tests/fixtures/djppr/*.html` + `tests/fixtures/bi/*.xlsx` yang merupakan fixture test SENGaja (dipakai test suite), jadi **dibukukan**, bukan di-ignore.
+  3. **`git add .` → `git status` dicek dulu sebelum commit**: `.env` TIDAK muncul di staged files (hanya `.env.example` yang ter-stage); `.venv/`, `__pycache__/`, `.pytest_cache/`, `.coverage` juga tidak ada. Verifikasi keras via `git ls-files | grep .env` → hanya `.env.example`. ✓
+  4. **Commit pertama** `7f2eea8` — pesan: `Fase 1 backend OBLIQ: pipeline kurva yield & makro (audited & stable)` (bukan "initial commit" generik): 69 files, 8,027 insertions (backend API + pipeline + migrasi + scheduler + fixtures + docs).
+  5. **TIDAK ada remote / TIDAK push** — sesuai instruksi, keputusan push terpisah nanti.
+  6. **Verifikasi akhir:** `git status` → `nothing to commit, working tree clean`; `.env` tetap tidak ter-track.
+- Hasil keputusan: **rekomendasi Sesi 19 (git init) dieksekusi — perlindungan `.gitignore` untuk `.env` kini BENAR-BENAR aktif.** Seluruh codebase di Fase 1 ada di history commit pertama sebagai baseline aman.
+- Pending:
+  - Dashboard Streamlit (kurva yield, indikator makro, halaman belajar) + gap handling di dashboard.
+  - (Opsional) buat remote GitHub & push — keputusan terpisah, bukan sesi ini.
+  - BPS 2024+ saat API buka (pemantauan otomatis via scheduler).
+- Wajib direview Ghif:
+  - Konfirmasi langkah git benar (branch `master`, commit hash `7f2eea8`, .env aman).
+  - Setuju lanjut build dashboard Streamlit sesi berikutnya?
+- Konsep finance baru: tidak ada sesi ini (opsi teknis repo).
+- Catatan jujur: warning CRLF (LF→CRLF) di commit pertama normal utk checkout di Windows; identitas git lokal = user.name `Medaka356`, user.email `ghifariakbar2006@gmail.com` (dipakai commit otomatis — sebaiknya dikonfirmasi Ghif). `.gitignore` memakai pola `.env` (hanya file root) — ini sengaja: `.env.example` ikut di-track karena berguna sebagai template, sedangkan `.env` (berisi secret) di-ignore.
 
 ### 2026-08-11 — Sesi 19 (audit & stabilisasi backend menyeluruh — Fase 1 backend: audited & stable)
 - Dikerjakan (SESI AUDIT, bukan nambah fitur — per instruksi Ghif):
