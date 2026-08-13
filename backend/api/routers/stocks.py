@@ -1,0 +1,68 @@
+"""Router: /api/stocks (read-only IHSG + LQ45 endpoints)."""
+from __future__ import annotations
+
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from api import schemas
+from api.dependencies import get_db
+from api.services import stock_service
+
+router = APIRouter(prefix="/api/stocks", tags=["stocks"])
+
+
+@router.get("/list", response_model=schemas.StockListResponse)
+def read_stock_list(
+    db: Session = Depends(get_db),
+) -> schemas.StockListResponse:
+    """All LQ45 equity stocks with latest close & day change."""
+    return stock_service.build_stock_list(db)
+
+
+@router.get("/ihsg/latest", response_model=schemas.StockLatestResponse)
+def read_ihsg_latest(
+    db: Session = Depends(get_db),
+) -> schemas.StockLatestResponse:
+    return stock_service.build_stock_latest(db)
+
+
+@router.get("/ihsg/history", response_model=schemas.StockHistoryResponse)
+def read_ihsg_history(
+    start: date | None = Query(default=None, description="inclusive"),
+    end: date | None = Query(default=None, description="inclusive"),
+    db: Session = Depends(get_db),
+) -> schemas.StockHistoryResponse:
+    """Full IHSG history, optionally ranged."""
+    if start is not None and end is not None and start > end:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Rentang tidak valid: start ({start}) setelah end ({end}).",
+        )
+    return stock_service.build_stock_history(db, start=start, end=end)
+
+
+@router.get("/{ticker}/latest", response_model=schemas.StockLatestResponse)
+def read_stock_latest(
+    ticker: str,
+    db: Session = Depends(get_db),
+) -> schemas.StockLatestResponse:
+    """Latest close for one stock (e.g. BBCA)."""
+    return stock_service.build_stock_latest(db, stock_code=ticker.upper())
+
+
+@router.get("/{ticker}/history", response_model=schemas.StockHistoryResponse)
+def read_stock_history(
+    ticker: str,
+    start: date | None = Query(default=None, description="inclusive"),
+    end: date | None = Query(default=None, description="inclusive"),
+    db: Session = Depends(get_db),
+) -> schemas.StockHistoryResponse:
+    """History for one stock (e.g. BBCA), optionally ranged."""
+    if start is not None and end is not None and start > end:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Rentang tidak valid: start ({start}) setelah end ({end}).",
+        )
+    return stock_service.build_stock_history(db, stock_code=ticker.upper(), start=start, end=end)

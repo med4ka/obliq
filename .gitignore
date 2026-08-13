@@ -5,3 +5,12 @@ __pycache__/
 .pytest_cache/
 .coverage
 .coverage.*
+
+# Internal design documents (not for public repo)
+SYSTEM.md
+RULES.md
+PRD.md
+ARCHITECTURE.md
+DESIGN.md
+SCHEMA.md
+PROGRESS.md

@@ -1,0 +1,12 @@
+[theme]
+base = "light"
+primaryColor = "#0F4C3A"
+backgroundColor = "#F6F1E7"
+secondaryBackgroundColor = "#FFFEF9"
+textColor = "#1F2419"
+# Fonts are loaded & applied via dashboard/lib/styling.py (Google Fonts).
+font = "sans serif"
+
+[server]
+# Dashboard reads the FastAPI layer; the web layer (API port) is unchanged.
+headless = true

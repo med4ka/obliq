@@ -1,0 +1,60 @@
+> """Storage of BPS inflation YoY into PostgreSQL.
+  
+> Upsert contract (ARCHITECTURE.md 4): re-running a fetch for the same
+> (observation_date) must update the existing row, never insert a duplicate.
+> Relies on the unique constraint uq_macro_type_date over
+> (indicator_type, observation_date) defined in SCHEMA.md and enforced in the
+> formal migration. Since `fetched_at` changes on every run, this is also how we
+> record when a value was last retrieved.
+> """
+> from __future__ import annotations
+  
+> import logging
+> from datetime import datetime
+> from decimal import Decimal
+  
+> from sqlalchemy import text
+> from sqlalchemy.engine import Engine
+  
+> from pipeline.transformers.bps import InflationYoY
+  
+> logger = logging.getLogger(__name__)
+  
+> INDICATOR_TYPE_YOY = "inflation_yoy"
+> SOURCE_BPS = "BPS"
+  
+> UPSERT_SQL = text(
+>     """
+>     INSERT INTO macro_indicators (indicator_type, observation_date, value, source, fetched_at)
+>     VALUES (:indicator_type, :observation_date, :value, :source, :fetched_at)
+>     ON CONFLICT (indicator_type, observation_date)
+>     DO UPDATE SET value = EXCLUDED.value,
+>                   source = EXCLUDED.source,
+>                   fetched_at = EXCLUDED.fetched_at
+>     """
+> )
+  
+  
+> def store(engine: Engine, observations: list[InflationYoY], fetched_at: datetime | None = None) -> int:
+>     """Upsert computed YoY observations. Returns number of rows written/updated.
+  
+>     Idempotent: same (indicator_type, observation_date) as a previous run just
+>     updates value + source + fetched_at in place.
+>     """
+!     fetched_at = fetched_at or datetime.now()
+!     count = 0
+!     with engine.begin() as conn:
+!         for obs in observations:
+!             conn.execute(
+!                 UPSERT_SQL,
+!                 {
+!                     "indicator_type": INDICATOR_TYPE_YOY,
+!                     "observation_date": obs.observation_date,
+!                     "value": obs.value,  # Decimal stays Decimal through the ORM driver
+!                     "source": SOURCE_BPS,
+!                     "fetched_at": fetched_at,
+!                 },
+!             )
+!             count += 1
+!     logger.info("BPS upsert selesai: %d observasi (indicator=%s source=%s)", count, INDICATOR_TYPE_YOY, SOURCE_BPS)
+!     return count

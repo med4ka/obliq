@@ -1,0 +1,167 @@
+> """Pydantic validation of raw Yahoo Finance v8 chart responses.
+  
+> The v8 chart endpoint returns (verified live, Sesi 28-29):
+  
+>     chart.result[0] = {
+>         "meta": { "currency": "IDR", "symbol": "^JKSE", "exchangeTimezoneName": "Asia/Jakarta", ... },
+>         "timestamp": [unix seconds, one per daily bar],
+>         "indicators": {
+>             "quote":    [{ "open": [...], "high": [...], "low": [...], "close": [...], "volume": [...] }],
+>             "adjclose": [{ "adjclose": [...] }]   # key is "adjclose", NOT "close"
+>         },
+>         "events": { "dividends": {...}, "splits": {...} }   # optional (events=div,splits)
+>     }
+  
+> Validation contract (ARCHITECTURE.md 4): if the raw response does not match the
+> expected shape -- wrong keys, missing arrays, mis-aligned lengths -- raise a
+> clear error. NEVER let malformed data reach the transformer.
+  
+> Prices are kept as raw float|None here (exactly what the API sends) and converted
+> to Decimal in the transformer via str() round-trip (SYSTEM.md 1.5 + RULES.md 2),
+> the same proven approach as the BPS validator.
+> """
+> from __future__ import annotations
+  
+> from dataclasses import dataclass
+> from typing import Any
+  
+> from pydantic import BaseModel, Field, field_validator
+  
+  
+> class YahooMeta(BaseModel):
+>     """Essential symbol context; the fields we actually rely on downstream."""
+  
+>     currency: str
+>     symbol: str
+>     exchangeTimezoneName: str = Field(default="Asia/Jakarta")
+  
+  
+> class YahooQuoteData(BaseModel):
+>     """One bar's OHLCV arrays (parallel to timestamp[])."""
+  
+>     open: list[float | None]
+>     high: list[float | None]
+>     low: list[float | None]
+>     close: list[float | None]
+>     volume: list[int | None]
+  
+  
+> class YahooAdjCloseData(BaseModel):
+>     """`indicators.adjclose[0]` -- keyed "adjclose", not "close"."""
+  
+>     adjclose: list[float | None]
+  
+  
+> class YahooIndicators(BaseModel):
+>     quote: list[YahooQuoteData]
+>     adjclose: list[YahooAdjCloseData] | None = None
+  
+  
+> class YahooChartResult(BaseModel):
+>     """`chart.result[0]` -- the whole validated series for one symbol."""
+  
+>     meta: YahooMeta
+>     timestamp: list[int]
+>     indicators: YahooIndicators
+>     events: dict[str, Any] | None = None
+  
+>     @field_validator("timestamp")
+>     @classmethod
+>     def _timestamps_must_grow(cls, v: list[int]) -> list[int]:
+>         if not v:
+>             raise ValueError("timestamp Yahoo kosong (tidak ada bar sama sekali)")
+>         for prev, cur in zip(v, v[1:]):
+!             if cur <= prev:
+!                 raise ValueError("timestamp Yahoo tidak terurut naik / ada duplikat")
+>         return v
+  
+>     @field_validator("indicators")
+>     @classmethod
+>     def _quote_arrays_must_be_aligned(cls, indicators: YahooIndicators) -> YahooIndicators:
+>         if not indicators.quote:
+!             raise ValueError("indicators.quote Yahoo kosong")
+>         quote = indicators.quote[0]
+>         lengths = {
+>             name: len(arr)
+>             for name, arr in (
+>                 ("open", quote.open),
+>                 ("high", quote.high),
+>                 ("low", quote.low),
+>                 ("close", quote.close),
+>                 ("volume", quote.volume),
+>             )
+>         }
+>         if len(set(lengths.values())) != 1:
+>             raise ValueError(f"panjang array quote Yahoo tidak seragam: {lengths}")
+>         if indicators.adjclose and indicators.adjclose[0].adjclose:
+>             if len(indicators.adjclose[0].adjclose) != lengths["close"]:
+>                 raise ValueError(
+>                     "panjang adjclose Yahoo != panjang close: "
+>                     f"{len(indicators.adjclose[0].adjclose)} vs {lengths['close']}"
+>                 )
+>         return indicators
+  
+  
+> class YahooChartData(BaseModel):
+>     """Validated raw data for one chart response, ready for the transformer."""
+  
+>     symbol: str
+>     meta: YahooMeta
+>     timestamp: list[int]
+>     quote: YahooQuoteData
+>     adjclose: list[float | None] | None
+>     events: dict[str, Any] | None = None
+  
+  
+> @dataclass(frozen=True)
+> class YahooChartResponseRaw:
+>     """Structural stand-in for the fetcher's response (keeps validator pure)."""
+  
+>     symbol: str
+>     body: dict[str, Any]
+  
+  
+> def validate_chart(response: object) -> YahooChartData:
+>     """Validate one fetch output into YahooChartData.
+  
+>     Accepts either the fetcher's YahooChartResponse (has `.body`) or a plain
+>     dict. Raises ValueError/ValidationError on any mismatch -- callers must NOT
+>     proceed to transform with unvalidated input (ARCHITECTURE.md 4).
+>     """
+>     symbol = getattr(response, "symbol", None)
+>     body = getattr(response, "body", response)
+>     if not isinstance(body, dict):
+!         raise TypeError(f"Respons Yahoo harus dict, dapat: {type(body).__name__}")
+  
+>     chart = body.get("chart")
+>     if not isinstance(chart, dict):
+>         raise ValueError("Respons Yahoo tidak punya key 'chart' (struktur berubah?)")
+>     error = chart.get("error")
+>     if error:
+>         raise ValueError(f"Yahoo mengembalikan error di chart.error: {error}")
+>     result = chart.get("result")
+>     if not isinstance(result, list) or not result:
+>         raise ValueError("chart.result Yahoo kosong (tidak ada data untuk simbol/range ini)")
+  
+>     payload = YahooChartResult.model_validate(result[0])
+!     n = len(payload.timestamp)
+!     quote = payload.indicators.quote[0]
+!     if len(quote.close) != n:
+!         raise ValueError(
+!             f"jumlah bar close ({len(quote.close)}) tidak sama dengan timestamp ({n})"
+!         )
+!     adj = (
+!         list(payload.indicators.adjclose[0].adjclose)
+!         if payload.indicators.adjclose and payload.indicators.adjclose[0].adjclose
+!         else None
+!     )
+  
+!     resolved_symbol = symbol or payload.meta.symbol
+!     return YahooChartData(
+!         symbol=resolved_symbol,
+!         meta=payload.meta,
+!         timestamp=payload.timestamp,
+!         quote=quote,
+!         adjclose=adj,
+!         events=payload.events,
+!     )

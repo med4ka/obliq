@@ -1,0 +1,106 @@
+> """Storage of Yahoo Finance stock data into PostgreSQL.
+  
+> Upsert contract (ARCHITECTURE.md 4): two-step upsert.
+>   - `stocks` is keyed by UNIQUE `code` (e.g. ^JKSE, BBCA).
+>   - `stock_observations` is keyed by UNIQUE (stock_id, observation_date).
+  
+> `source='YAHOO'` and `fetched_at` are audit fields (SCHEMA.md): every rendered
+> number must be traceable to where it came from and when.
+> """
+> from __future__ import annotations
+  
+> import logging
+> from datetime import datetime
+  
+> from sqlalchemy import text
+> from sqlalchemy.engine import Engine
+  
+> from pipeline.transformers.yahoo import StockObservation
+  
+> logger = logging.getLogger(__name__)
+  
+> SOURCE_YAHOO = "YAHOO"
+  
+> UPSERT_STOCK_SQL = text(
+>     """
+>     INSERT INTO stocks (code, symbol_yahoo, name, kind, is_active)
+>     VALUES (:code, :symbol_yahoo, :name, :kind, true)
+>     ON CONFLICT (code) DO UPDATE
+>         SET symbol_yahoo = EXCLUDED.symbol_yahoo,
+>             name = EXCLUDED.name,
+>             kind = EXCLUDED.kind
+>     RETURNING id
+>     """
+> )
+  
+> UPSERT_OBS_SQL = text(
+>     """
+>     INSERT INTO stock_observations
+>         (stock_id, observation_date, open, high, low, close, adj_close, volume, source, fetched_at, is_estimated)
+>     VALUES (:stock_id, :observation_date, :open, :high, :low, :close, :adj_close, :volume, :source, :fetched_at, false)
+>     ON CONFLICT (stock_id, observation_date) DO UPDATE
+>         SET open = EXCLUDED.open,
+>             high = EXCLUDED.high,
+>             low = EXCLUDED.low,
+>             close = EXCLUDED.close,
+>             adj_close = EXCLUDED.adj_close,
+>             volume = EXCLUDED.volume,
+>             source = EXCLUDED.source,
+>             fetched_at = EXCLUDED.fetched_at
+>     """
+> )
+  
+  
+> def store(
+>     engine: Engine,
+>     code: str,
+>     symbol_yahoo: str,
+>     name: str,
+>     kind: str,
+>     observations: list[StockObservation],
+>     fetched_at: datetime | None = None,
+> ) -> dict[str, int]:
+>     """Upsert stock metadata + daily observations. Returns {stock: id, obs: n}.
+  
+>     Idempotent: same (stock_id, observation_date) as a previous run updates
+>     values in place (ARCHITECTURE.md 4).
+>     """
+!     fetched_at = fetched_at or datetime.now()
+!     with engine.begin() as conn:
+!         row = conn.execute(
+!             UPSERT_STOCK_SQL,
+!             {
+!                 "code": code,
+!                 "symbol_yahoo": symbol_yahoo,
+!                 "name": name,
+!                 "kind": kind,
+!             },
+!         ).first()
+!         if row is None:
+!             raise RuntimeError(f"Upsert stock {code} tidak mengembalikan id")
+!         stock_id = int(row[0])
+  
+!         obs_written = 0
+!         for obs in observations:
+!             conn.execute(
+!                 UPSERT_OBS_SQL,
+!                 {
+!                     "stock_id": stock_id,
+!                     "observation_date": obs.observation_date,
+!                     "open": obs.open,
+!                     "high": obs.high,
+!                     "low": obs.low,
+!                     "close": obs.close,
+!                     "adj_close": obs.adj_close,
+!                     "volume": obs.volume,
+!                     "source": SOURCE_YAHOO,
+!                     "fetched_at": fetched_at,
+!                 },
+!             )
+!             obs_written += 1
+  
+!     logger.info(
+!         "Yahoo upsert selesai: stock=%s (id=%d), %d observasi (source=%s)",
+!         code, stock_id, obs_written, SOURCE_YAHOO,
+!     )
+!     return {"stock": stock_id, "obs": obs_written}

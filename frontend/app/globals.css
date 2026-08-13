@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+/*
+ * Obliq design tokens (DESIGN.md §1) as Tailwind v4 theme.
+ * Base = "Kertas Sertifikat" light mode. No dark mode default.
+ * Fonts: Source Serif 4 (heading) / IBM Plex Sans (body) / IBM Plex Mono (numbers).
+ * Font CSS variables (--font-*) are defined by next/font/google in app/layout.tsx.
+ */
+
+@theme {
+  --color-parchment: #f6f1e7;
+  --color-ink: #1f2419;
+  --color-ink-muted: #6b6355;
+  --color-ledger-green: #0f4c3a;
+  --color-surface: #fffef9;
+  --color-seal-red: #8c2f1f;
+  --color-gold-verified: #a67c27;
+
+  --font-serif: var(--font-source-serif), Georgia, serif;
+  --font-sans: var(--font-plex-sans), system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-parchment text-ink font-sans antialiased;
+  }
+}
